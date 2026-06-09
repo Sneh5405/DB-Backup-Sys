@@ -2,14 +2,24 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
+import logger from './logger.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const packageRoot = path.resolve(__dirname, '../../');
 const envPath = path.join(packageRoot, '.env');
 
-// Load .env file from the package root directory
-dotenv.config({ path: envPath, override: true });
+const localEnvPath = path.join(process.cwd(), '.env');
+let localEnvLoaded = false;
+
+// 1. Try to load local .env from current working directory first (auto-detect)
+if (fs.existsSync(localEnvPath) && localEnvPath !== envPath) {
+  dotenv.config({ path: localEnvPath, override: true });
+  localEnvLoaded = true;
+}
+
+// 2. Load .env file from the package root directory as fallback (filling in missing vars)
+dotenv.config({ path: envPath, override: false });
 
 export interface DbConfig {
   type: 'postgres' | 'mysql' | 'sqlite';
@@ -110,6 +120,10 @@ export function parseConnectionString(connectionString: string): Partial<DbConfi
 }
 
 export function loadConfig(configPath?: string): AppConfig {
+  if (localEnvLoaded) {
+    logger.info(`Auto-detected and loaded configuration from local environment: ${localEnvPath}`);
+  }
+
   // Read database connection string from environment if set
   const envConnStr = process.env.SOURCE_DATABASE_URL || process.env.DATABASE_URL || process.env.DB_CONNECTION_STRING || process.env.DB_URL || '';
   const parsedFromEnv = envConnStr ? parseConnectionString(envConnStr) : {};
