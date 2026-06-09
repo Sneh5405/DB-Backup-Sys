@@ -137,11 +137,82 @@ export function generateSystemdTimer(cronExpr: string): string {
 
   return `[Unit]
 Description=Timer to trigger Database Backup Service
-
+ 
 [Timer]
 OnCalendar=${onCalendar}
 Persistent=true
-
+ 
 [Install]
 WantedBy=timers.target`;
+}
+
+/**
+ * Translates a daily/hourly simple cron expression to macOS plist trigger dictionary keys.
+ */
+function parseCronForMacOs(cronExpr: string): string {
+  const parts = cronExpr.trim().split(/\s+/);
+  if (parts.length === 5) {
+    const [minute, hour, dayOfMonth, month, dayOfWeek] = parts;
+    let dictContent = '';
+    
+    if (minute !== '*') {
+      dictContent += `    <key>Minute</key>\n    <integer>${minute}</integer>\n`;
+    }
+    if (hour !== '*') {
+      dictContent += `    <key>Hour</key>\n    <integer>${hour}</integer>\n`;
+    }
+    if (dayOfMonth !== '*') {
+      dictContent += `    <key>Day</key>\n    <integer>${dayOfMonth}</integer>\n`;
+    }
+    if (month !== '*') {
+      dictContent += `    <key>Month</key>\n    <integer>${month}</integer>\n`;
+    }
+    if (dayOfWeek !== '*') {
+      const launchdDay = dayOfWeek === '*' ? null : Number(dayOfWeek);
+      if (launchdDay !== null && !isNaN(launchdDay)) {
+        dictContent += `    <key>Weekday</key>\n    <integer>${launchdDay}</integer>\n`;
+      }
+    }
+    
+    if (dictContent) {
+      return `<key>StartCalendarInterval</key>\n  <dict>\n${dictContent.trimEnd()}\n  </dict>`;
+    }
+  }
+  
+  return `<key>StartCalendarInterval</key>\n  <dict>\n    <key>Hour</key>\n    <integer>2</integer>\n    <key>Minute</key>\n    <integer>0</integer>\n  </dict>`;
+}
+
+/**
+ * Generates macOS launchd plist configuration content.
+ */
+export function generateMacOsPlist(cronExpr: string, nodePath: string, scriptPath: string, args: string, label: string = 'com.dbbackup.scheduler'): string {
+  const absNodePath = path.resolve(nodePath);
+  const absScriptPath = path.resolve(scriptPath);
+  const triggerXml = parseCronForMacOs(cronExpr);
+
+  const argArray = args.trim().split(/\s+/).filter(Boolean);
+  const argsXml = [absScriptPath, ...argArray]
+    .map(arg => `    <string>${arg}</string>`)
+    .join('\n');
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${label}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${absNodePath}</string>
+${argsXml}
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  ${triggerXml}
+  <key>StandardOutPath</key>
+  <string>/tmp/${label}.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/${label}.err.log</string>
+</dict>
+</plist>`;
 }

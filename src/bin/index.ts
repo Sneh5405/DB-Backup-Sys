@@ -4,11 +4,12 @@ import { runBackup } from '../backup-engine.js';
 import { runRestore } from '../restore-engine.js';
 import logger, { configureLogger } from '../utils/logger.js';
 import { startScheduler } from '../scheduler/cron.js';
-import { generateWindowsXml, generateSystemdService, generateSystemdTimer } from '../scheduler/templates.js';
+import { generateWindowsXml, generateSystemdService, generateSystemdTimer, generateMacOsPlist } from '../scheduler/templates.js';
 import { loadManifest } from '../utils/manifest.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { spawn } from 'child_process';
 
 const program = new Command();
 
@@ -220,9 +221,60 @@ program
   .description('Run built-in DB backup scheduler')
   .requiredOption('--cron <expression>', 'cron schedule expression (e.g. "0 2 * * *")')
   .option('-c, --config <path>', 'path to JSON configuration file')
+  .option('--daemon', 'run scheduler continuously as a background daemon process')
+  .option('--pid-file <path>', 'path to store process ID file', './db-backup.pid')
   .action(async (options) => {
     try {
+      const pidFilePath = path.resolve(options.pidFile || './db-backup.pid');
+
+      if (options.daemon) {
+        // Parent process spawns detached child, then exits
+        const args = process.argv.slice(2).filter(arg => arg !== '--daemon');
+        const child = spawn(process.execPath, [process.argv[1], ...args], {
+          detached: true,
+          stdio: 'ignore',
+        });
+
+        fs.writeFileSync(pidFilePath, String(child.pid), 'utf-8');
+        logger.info(`Scheduler started in background (Daemon Mode) with PID: ${child.pid}`);
+        logger.info(`PID file written to: ${pidFilePath}`);
+        child.unref();
+        process.exit(0);
+      }
+
+      // Write PID file for the running process
+      fs.writeFileSync(pidFilePath, String(process.pid), 'utf-8');
+      logger.info(`Scheduler running with PID: ${process.pid}`);
+
+      // Register exit/cleanup handlers to remove PID file
+      const cleanupPid = () => {
+        if (fs.existsSync(pidFilePath)) {
+          try {
+            fs.unlinkSync(pidFilePath);
+            logger.debug(`PID file deleted: ${pidFilePath}`);
+          } catch (err: any) {
+            logger.debug(`Failed to delete PID file: ${err.message}`);
+          }
+        }
+      };
+      process.on('SIGINT', () => { cleanupPid(); process.exit(0); });
+      process.on('SIGTERM', () => { cleanupPid(); process.exit(0); });
+      process.on('exit', cleanupPid);
+
       const config = loadConfig(options.config);
+
+      // Register SIGHUP listener to reload database configuration in-place
+      process.on('SIGHUP', () => {
+        logger.info('SIGHUP received. Reloading database configurations...');
+        try {
+          const newConfig = loadConfig(options.config);
+          Object.assign(config, newConfig);
+          logger.info('Configurations reloaded successfully!');
+        } catch (err: any) {
+          logger.error(`Failed to reload configuration: ${err.message}`);
+        }
+      });
+
       startScheduler(config, options.cron);
     } catch (error: any) {
       logger.error(`Scheduler failed to start: ${error.message}`);
@@ -233,8 +285,8 @@ program
 // Schedule-Template Command
 program
   .command('schedule-template')
-  .description('Generate template configuration for Windows Task Scheduler or Linux systemd')
-  .requiredOption('--type <windows|systemd>', 'type of template (windows or systemd)')
+  .description('Generate template configuration for Windows, systemd, or macOS launchd')
+  .requiredOption('--type <windows|systemd|macos>', 'type of template (windows, systemd, or macos)')
   .option('--cron <expression>', 'cron schedule expression', '0 2 * * *')
   .option('--args <arguments>', 'CLI arguments to pass to db-backup', 'backup')
   .option('--node-path <path>', 'override path to Node.js executable', process.execPath)
@@ -254,6 +306,8 @@ program
         const serviceContent = generateSystemdService(workingDir, options.nodePath, cliEntryPath, options.args);
         const timerContent = generateSystemdTimer(options.cron);
         outputText = `#### systemd Service Configuration (db-backup.service) ####\n\n${serviceContent}\n\n#### systemd Timer Configuration (db-backup.timer) ####\n\n${timerContent}`;
+      } else if (options.type === 'macos') {
+        outputText = generateMacOsPlist(options.cron, options.nodePath, cliEntryPath, options.args);
       } else {
         throw new Error('Unsupported template type: ' + options.type);
       }
@@ -271,6 +325,46 @@ program
       }
     } catch (error: any) {
       logger.error(`Failed to generate schedule template: ${error.message}`);
+      process.exit(1);
+    }
+  });
+
+// Stop Command
+program
+  .command('stop')
+  .description('Stop the running scheduler daemon process')
+  .option('--pid-file <path>', 'path to the process ID file', './db-backup.pid')
+  .action(async (options) => {
+    try {
+      const pidFilePath = path.resolve(options.pidFile || './db-backup.pid');
+      if (!fs.existsSync(pidFilePath)) {
+        logger.error(`No running daemon found. PID file not found at: ${pidFilePath}`);
+        process.exit(1);
+      }
+
+      const pidStr = fs.readFileSync(pidFilePath, 'utf-8').trim();
+      const pid = parseInt(pidStr, 10);
+      if (isNaN(pid)) {
+        logger.error(`Invalid PID in file: ${pidStr}`);
+        process.exit(1);
+      }
+
+      logger.info(`Attempting to stop scheduler daemon with PID: ${pid}...`);
+      try {
+        process.kill(pid, 'SIGTERM');
+        logger.info(`Daemon process ${pid} terminated successfully.`);
+      } catch (err: any) {
+        if (err.code === 'ESRCH') {
+          logger.warn(`Process ${pid} is not running. Cleaning up stale PID file.`);
+          if (fs.existsSync(pidFilePath)) {
+            fs.unlinkSync(pidFilePath);
+          }
+        } else {
+          throw err;
+        }
+      }
+    } catch (error: any) {
+      logger.error(`Failed to stop daemon: ${error.message}`);
       process.exit(1);
     }
   });

@@ -1,6 +1,17 @@
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import { pipeline } from 'stream/promises';
+
+function calculateFileChecksum(filePath: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    const stream = fs.createReadStream(filePath);
+    stream.on('data', (data) => hash.update(data));
+    stream.on('end', () => resolve(hash.digest('hex')));
+    stream.on('error', (err) => reject(err));
+  });
+}
 import { AppConfig, DbConfig } from './utils/config.js';
 import { createDecompressStream } from './utils/compressor.js';
 import { ChecksumStream } from './utils/checksum.js';
@@ -94,6 +105,16 @@ export async function runRestore(
   // 1. Detect settings
   const settings = detectBackupSettings(absolutePath, config.backup.outputDir, config.database.type);
   logger.info(`Detected backup settings: DB=${settings.dbType}, Compressed=${settings.isCompressed}, Encrypted=${settings.isEncrypted}`);
+
+  // 1.5 Pre-Restore Integrity Verification
+  if (settings.originalChecksum) {
+    logger.info('Performing pre-restore integrity verification...');
+    const computedChecksum = await calculateFileChecksum(absolutePath);
+    if (computedChecksum !== settings.originalChecksum) {
+      throw new Error(`Pre-restore integrity verification FAILED! Backup file checksum (${computedChecksum}) does not match original manifest checksum (${settings.originalChecksum})`);
+    }
+    logger.info('Pre-restore integrity verification PASSED.');
+  }
 
   // 2. Prepare database configuration (handling dry-run temporary names)
   const targetDbConfig = { ...config.database, type: settings.dbType };

@@ -3,7 +3,7 @@ import path from 'path';
 import { runBackup } from '../backup-engine.js';
 import { runRestore } from '../restore-engine.js';
 import { loadManifest, saveManifest, ManifestEntry } from '../utils/manifest.js';
-import { generateWindowsXml } from '../scheduler/templates.js';
+import { generateWindowsXml, generateMacOsPlist } from '../scheduler/templates.js';
 import { pruneLocalBackups } from '../utils/retention.js';
 import { parseConnectionString } from '../utils/config.js';
 import logger from '../utils/logger.js';
@@ -419,6 +419,57 @@ async function runIntegrationTests() {
       throw new Error(`Expected 2 backups in manifest, found ${manifestMulti.length}`);
     }
     logger.info('✅ Test 8 Passed!');
+
+    // ----------------------------------------------------
+    // TEST 9: Pre-restore Integrity Check Failure
+    // ----------------------------------------------------
+    logger.info('--- Test 9: Pre-Restore Checksum Validation ---');
+    const outDir9 = path.join(sandboxDir, 'backups9');
+    const config9 = {
+      database: {
+        type: 'sqlite' as const,
+        sqliteDbPath: dbPath,
+      },
+      backup: {
+        outputDir: outDir9,
+        compress: 'none' as const,
+        encrypt: false,
+        remoteProvider: 'local' as const,
+      }
+    };
+
+    const entry9 = await runBackup(config9);
+    const backupFile9 = entry9.filePath;
+
+    // Tamper with the backup file on disk by appending corrupted text
+    fs.appendFileSync(backupFile9, 'CORRUPTED DATA STREAM TRAILING CONTENT');
+
+    // Attempt to restore it should fail during the pre-restore checksum check
+    let threwChecksumError = false;
+    try {
+      await runRestore(config9, backupFile9, { dryRun: true });
+    } catch (err: any) {
+      if (err.message.includes('Pre-restore integrity verification FAILED')) {
+        threwChecksumError = true;
+        logger.info('Expected integrity verification error caught: ' + err.message);
+      } else {
+        throw new Error(`Restore failed with unexpected error: ${err.message}`);
+      }
+    }
+    if (!threwChecksumError) {
+      throw new Error('Test 9 restoration of tampered file should have failed pre-restore check!');
+    }
+    logger.info('✅ Test 9 Passed!');
+
+    // ----------------------------------------------------
+    // TEST 10: macOS launchd plist Generator
+    // ----------------------------------------------------
+    logger.info('--- Test 10: macOS plist Template Generation ---');
+    const plist = generateMacOsPlist('0 2 * * *', 'node', 'index.js', 'backup');
+    if (!plist.includes('<?xml') || !plist.includes('<plist') || !plist.includes('<key>Label</key>') || !plist.includes('<key>StartCalendarInterval</key>')) {
+      throw new Error('Generated macOS launchd plist task configuration is invalid.');
+    }
+    logger.info('✅ Test 10 Passed!');
 
     logger.info('🎉 ALL INTEGRATION TESTS PASSED SUCCESSFULLY! Everything is green! ✅');
 

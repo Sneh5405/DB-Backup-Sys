@@ -7,14 +7,16 @@ A robust, stream-first command-line utility built with Node.js and TypeScript fo
 ## Features
 
 - 🗄️ **Multi-DB Support**: Out-of-the-box integration with PostgreSQL (`pg_dump`/`psql`), MySQL (`mysqldump`/`mysql`), and SQLite files.
+- 🔗 **Connection String Autodetect**: Automatically parses connection URIs (e.g. `DATABASE_URL`) from environment variables or command-line flags to resolve database types and credentials.
 - ⚡ **Stream-First Pipeline**: Streams database outputs directly to compression, encryption, hashing, and write streams without blocking CPU or saturating disk buffers.
 - 🔒 **AES-256-GCM Authenticated Encryption**: Secure encryption with authenticated tags ensuring no tampered or corrupted backups are ever restored.
 - 📦 **Gzip Compression**: Stream compression via Node's native `zlib` API.
 - 📋 **Manifest Catalog Tracking**: Updates `backups-manifest.json` after every backup run, cataloging timestamps, files, sizes, checksums, and states.
 - ☁️ **Remote Storage Sync**: Sync backups to **AWS S3 / GCS** (multipart chunks) or **SFTP** (via `ssh2.fastPut`).
 - 🗑️ **Local Retention Policy**: Auto-prunes local files exceeding configured age policies.
+- 🛡️ **Pre-Restore Integrity Check**: Computes local file SHA-256 hashes and compares them to catalog logs *before* restoring begins, preventing corrupted database writes.
 - 🧪 **Throwaway Dry-Run Restore**: Validates backup health by automatically creating a temporary verification database, importing the backup, performing SHA-256 integrity validation, and tearing down the database.
-- ⏰ **Scheduling & Daemons**: Built-in cron task daemon, and generators for Windows Task Scheduler XML templates and Linux systemd services.
+- ⏰ **Scheduling & Daemons**: Built-in cron task daemon with PID management, SIGHUP config reloading, and configuration templates for systemd, Windows Task Scheduler, and macOS launchd.
 
 ---
 
@@ -27,7 +29,7 @@ A robust, stream-first command-line utility built with Node.js and TypeScript fo
 │   ├── bin/
 │   │   └── index.ts          # Main CLI commands definition (Commander)
 │   ├── connectors/
-│   │   ├── postgres.ts       # pg_dump / psql CLI stream wrappers
+│   │   ├── postgres.ts       # pg_dump / psql CLI stream wrappers (including clean drops)
 │   │   ├── mysql.ts          # mysqldump / mysql CLI stream wrappers
 │   │   └── sqlite.ts         # SQLite file copy stream wrappers
 │   ├── encryptors/
@@ -37,7 +39,7 @@ A robust, stream-first command-line utility built with Node.js and TypeScript fo
 │   │   └── sftp.ts           # SFTP server client sync
 │   ├── scheduler/
 │   │   ├── cron.ts           # Cron executor
-│   │   └── templates.ts      # systemd / Windows XML triggers generators
+│   │   └── templates.ts      # systemd / Windows XML / macOS plist generators
 │   ├── utils/
 │   │   ├── checksum.ts       # On-the-fly SHA-256 stream hasher
 │   │   ├── compressor.ts     # Gzip compression stream
@@ -76,13 +78,11 @@ You can configure the tool using **Environment Variables** (stored in a `.env` f
 ### 1. `.env` File Template
 Create a `.env` file at the root:
 ```ini
-# DB Settings
-DB_TYPE=postgres
-DB_HOST=localhost
-DB_PORT=5432
-DB_USER=postgres
-DB_PASSWORD=secret_password
-DB_NAME=production_db
+# DB Settings (Single Database URL)
+DATABASE_URL="postgresql://postgres:secret@localhost:5432/production_db"
+
+# Or for multiple microservices, specify a comma-separated list of connection URLs:
+# DB_URLS="postgresql://user:pass@host1:5432/db1,postgresql://user:pass@host2:5432/db2,mysql://user:pass@host3:3306/db3"
 
 # Windows Executable Paths (Optional)
 # PG_DUMP_PATH=C:\Program Files\PostgreSQL\16\bin\pg_dump.exe
@@ -110,13 +110,12 @@ SLACK_WEBHOOK_URL=https://hooks.slack.com/services/T00/B00/X00
 ```json
 {
   "database": {
-    "type": "postgres",
-    "host": "localhost",
-    "port": 5432,
-    "user": "postgres",
-    "password": "env:DB_PASSWORD",
-    "name": "production_db"
+    "connectionString": "env:DATABASE_URL"
   },
+  "databases": [
+    { "connectionString": "env:AUTH_DB_URL" },
+    { "connectionString": "env:ORDER_DB_URL" }
+  ],
   "backup": {
     "outputDir": "./backups",
     "compress": "gzip",
@@ -136,20 +135,20 @@ Run the command-line interface using:
 `node bin/index.js <command> [options]`
 
 ### 1. `backup`
-Triggers database backup.
+Triggers database backup. Loops automatically if multiple databases are configured.
 ```bash
-# Basic SQLite backup
-node bin/index.js backup --db sqlite --sqlite-db-path ./data.db
+# Basic backup using environment DATABASE_URL
+node bin/index.js backup
 
-# Backup with compression and AES-GCM encryption
-node bin/index.js backup --db postgres --database app_db --compress gzip --encrypt --passphrase "mykey"
+# Backup using explicit connection string
+node bin/index.js backup --url "postgresql://postgres:secret@localhost:5432/app_db" --compress gzip --encrypt --passphrase "mykey"
 
 # Backup utilizing a custom JSON configuration file
 node bin/index.js backup --config ./production.config.json
 ```
 
 ### 2. `restore`
-Restores database. Auto-detects encryption/compression from catalog manifest or filename suffixes.
+Restores database. Automatically runs a SHA-256 pre-verification integrity check and auto-detects encryption/compression settings.
 ```bash
 # Perform a live production restore
 node bin/index.js restore ./backups/backup-postgres-app_db-date.sql.gz.enc --passphrase "mykey"
@@ -165,27 +164,40 @@ node bin/index.js list
 ```
 
 ### 4. `schedule`
-Starts the built-in scheduler running in the foreground:
+Starts the built-in scheduler. Can be run in foreground or detached daemon mode.
 ```bash
-# Start backup task scheduler running every 6 hours
+# Start backup task scheduler running every 6 hours in the foreground
 node bin/index.js schedule --cron "0 */6 * * *"
+
+# Start the scheduler in background Daemon Mode
+node bin/index.js schedule --cron "0 */6 * * *" --daemon --pid-file ./scheduler.pid
+```
+*Note: Send a `SIGHUP` signal to the daemon process (e.g. `kill -SIGHUP $(cat scheduler.pid)`) to hot-reload database configurations in-place.*
+
+### 5. `stop`
+Stops a running scheduler background daemon process.
+```bash
+node bin/index.js stop --pid-file ./scheduler.pid
 ```
 
-### 5. `schedule-template`
+### 6. `schedule-template`
 Generates scheduling configuration templates for operating system services:
 ```bash
 # Output Windows Task Scheduler XML Import Schema template
-node bin/index.js schedule-template --type windows --cron "0 2 * * *" --args "backup --config ./prod.config.json"
+node bin/index.js schedule-template --type windows --cron "0 2 * * *" --args "backup"
 
 # Write systemd service and timer config templates directly to files
 node bin/index.js schedule-template --type systemd --cron "0 2 * * *" --output-file ./backup.timer
+
+# Output macOS launchd plist task configuration template
+node bin/index.js schedule-template --type macos --cron "0 2 * * *" --args "backup"
 ```
 
 ---
 
 ## Testing
 
-Execute tests to verify cryptographic stream correctness:
+Execute tests to verify cryptographic stream correctness and multi-db configuration loops:
 ```bash
 npm test
 ```
