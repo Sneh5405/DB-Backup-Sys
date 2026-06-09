@@ -1,9 +1,15 @@
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 
-// Load .env file
-dotenv.config({ override: true });
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const packageRoot = path.resolve(__dirname, '../../');
+const envPath = path.join(packageRoot, '.env');
+
+// Load .env file from the package root directory
+dotenv.config({ path: envPath, override: true });
 
 export interface DbConfig {
   type: 'postgres' | 'mysql' | 'sqlite';
@@ -149,6 +155,17 @@ export function loadConfig(configPath?: string): AppConfig {
       slackWebhookUrl: process.env.SLACK_WEBHOOK_URL || '',
     },
   };
+
+  // Resolve relative paths to be relative to the package installation directory (packageRoot)
+  if (defaultConfig.backup.outputDir && (defaultConfig.backup.outputDir.startsWith('./') || defaultConfig.backup.outputDir.startsWith('../'))) {
+    defaultConfig.backup.outputDir = path.resolve(packageRoot, defaultConfig.backup.outputDir);
+  }
+  if (defaultConfig.backup.keyFile && (defaultConfig.backup.keyFile.startsWith('./') || defaultConfig.backup.keyFile.startsWith('../'))) {
+    defaultConfig.backup.keyFile = path.resolve(packageRoot, defaultConfig.backup.keyFile);
+  }
+  if (defaultConfig.database.sqliteDbPath && (defaultConfig.database.sqliteDbPath.startsWith('./') || defaultConfig.database.sqliteDbPath.startsWith('../'))) {
+    defaultConfig.database.sqliteDbPath = path.resolve(packageRoot, defaultConfig.database.sqliteDbPath);
+  }
 
   // Read multi-db URLs from env if present (comma-separated)
   if (process.env.DB_URLS) {
