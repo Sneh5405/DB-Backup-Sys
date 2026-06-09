@@ -86,6 +86,7 @@ program
           pgDumpPath: options.pgDumpPath || baseConfig.database.pgDumpPath,
           mysqlDumpPath: options.mysqlDumpPath || baseConfig.database.mysqlDumpPath,
         },
+        databases: baseConfig.databases,
         backup: {
           outputDir: options.output || baseConfig.backup.outputDir,
           compress: options.compress || baseConfig.backup.compress,
@@ -118,8 +119,35 @@ program
         finalConfig.database.port = parseInt(finalConfig.database.port, 10);
       }
 
+      // Check if they want to backup a list of databases instead of a single one
+      const hasCliOverrides = !!(
+        options.db ||
+        options.connectionString ||
+        options.url ||
+        options.host ||
+        options.port ||
+        options.user ||
+        options.password ||
+        options.database ||
+        options.sqliteDbPath
+      );
+
       // 3. Run backup
-      await runBackup(finalConfig);
+      if (!hasCliOverrides && finalConfig.databases && finalConfig.databases.length > 0) {
+        logger.info(`Starting sequential backups for ${finalConfig.databases.length} databases...`);
+        for (let i = 0; i < finalConfig.databases.length; i++) {
+          const db = finalConfig.databases[i];
+          logger.info(`[Database ${i + 1}/${finalConfig.databases.length}] Processing backup...`);
+          const singleDbConfig: AppConfig = {
+            database: db,
+            backup: finalConfig.backup,
+          };
+          await runBackup(singleDbConfig);
+        }
+        logger.info(`All ${finalConfig.databases.length} database backups finished successfully!`);
+      } else {
+        await runBackup(finalConfig);
+      }
     } catch (error: any) {
       logger.error(`Backup CLI command failed: ${error.message}`);
       process.exit(1);

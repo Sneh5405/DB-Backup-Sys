@@ -369,6 +369,57 @@ async function runIntegrationTests() {
     }
     logger.info('✅ Test 7 Passed!');
 
+    // ----------------------------------------------------
+    // TEST 8: Multi-Database Configuration and Loop
+    // ----------------------------------------------------
+    logger.info('--- Test 8: Multi-Database Backup Flow ---');
+    const dbPath1 = path.join(sandboxDir, 'mock1.db');
+    const dbPath2 = path.join(sandboxDir, 'mock2.db');
+    fs.writeFileSync(dbPath1, 'SQLite format 3\u0000Mock database 1 contents', 'utf-8');
+    fs.writeFileSync(dbPath2, 'SQLite format 3\u0000Mock database 2 contents', 'utf-8');
+
+    const multiOutDir = path.join(sandboxDir, 'multi-backups');
+    const multiConfig = {
+      databases: [
+        {
+          type: 'sqlite' as const,
+          sqliteDbPath: dbPath1,
+          name: 'auth_service'
+        },
+        {
+          type: 'sqlite' as const,
+          sqliteDbPath: dbPath2,
+          name: 'orders_service'
+        }
+      ],
+      backup: {
+        outputDir: multiOutDir,
+        compress: 'none' as const,
+        encrypt: false,
+        remoteProvider: 'local' as const,
+      }
+    };
+
+    // Verify sequential backing up of multiple databases
+    if (multiConfig.databases && multiConfig.databases.length > 0) {
+      for (const db of multiConfig.databases) {
+        const singleDbConfig = {
+          database: db,
+          backup: multiConfig.backup,
+        };
+        const entry = await runBackup(singleDbConfig);
+        if (!fs.existsSync(entry.filePath)) {
+          throw new Error(`Multi-db backup failed to create file for: ${db.name}`);
+        }
+      }
+    }
+
+    const manifestMulti = loadManifest(multiOutDir);
+    if (manifestMulti.length !== 2) {
+      throw new Error(`Expected 2 backups in manifest, found ${manifestMulti.length}`);
+    }
+    logger.info('✅ Test 8 Passed!');
+
     logger.info('🎉 ALL INTEGRATION TESTS PASSED SUCCESSFULLY! Everything is green! ✅');
 
   } finally {

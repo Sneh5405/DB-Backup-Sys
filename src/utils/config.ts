@@ -51,6 +51,7 @@ export interface BackupConfig {
 
 export interface AppConfig {
   database: DbConfig;
+  databases?: DbConfig[];
   backup: BackupConfig;
 }
 
@@ -149,6 +150,24 @@ export function loadConfig(configPath?: string): AppConfig {
     },
   };
 
+  // Read multi-db URLs from env if present (comma-separated)
+  if (process.env.DB_URLS) {
+    const urls = process.env.DB_URLS.split(',').map(s => s.trim()).filter(Boolean);
+    defaultConfig.databases = urls.map(url => {
+      const parsed = parseConnectionString(url);
+      return {
+        type: (parsed.type || 'postgres') as 'postgres' | 'mysql' | 'sqlite',
+        connectionString: url,
+        host: parsed.host || 'localhost',
+        port: parsed.port,
+        user: parsed.user || '',
+        password: parsed.password || '',
+        name: parsed.name || '',
+        sqliteDbPath: parsed.sqliteDbPath || '',
+      };
+    });
+  }
+
   // Set default ports based on database type if port is not specified
   if (defaultConfig.database.port === undefined) {
     if (defaultConfig.database.type === 'postgres') defaultConfig.database.port = 5432;
@@ -178,6 +197,30 @@ export function loadConfig(configPath?: string): AppConfig {
           ...fileConfig.database,
         };
         defaultConfig.database.connectionString = resolvedConnStr || defaultConfig.database.connectionString;
+      }
+
+      // Merge databases list config
+      if (Array.isArray(fileConfig.databases)) {
+        defaultConfig.databases = fileConfig.databases.map((dbEntry: any) => {
+          const rawConnStr = dbEntry.connectionString;
+          const resolvedConnStr = resolveEnvValue(rawConnStr);
+          const parsedFromConfig = resolvedConnStr ? parseConnectionString(resolvedConnStr) : {};
+
+          const mergedDb: DbConfig = {
+            type: (dbEntry.type || parsedFromConfig.type || 'postgres') as 'postgres' | 'mysql' | 'sqlite',
+            connectionString: resolvedConnStr || undefined,
+            host: resolveEnvValue(dbEntry.host) || parsedFromConfig.host || 'localhost',
+            port: dbEntry.port !== undefined ? dbEntry.port : parsedFromConfig.port,
+            user: resolveEnvValue(dbEntry.user) || parsedFromConfig.user || '',
+            password: resolveEnvValue(dbEntry.password) || parsedFromConfig.password || '',
+            name: resolveEnvValue(dbEntry.name) || parsedFromConfig.name || '',
+            pgDumpPath: resolveEnvValue(dbEntry.pgDumpPath) || '',
+            mysqlDumpPath: resolveEnvValue(dbEntry.mysqlDumpPath) || '',
+            sqliteDbPath: resolveEnvValue(dbEntry.sqliteDbPath) || parsedFromConfig.sqliteDbPath || '',
+          };
+
+          return mergedDb;
+        });
       }
 
       // Merge backup config
